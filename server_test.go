@@ -5315,3 +5315,22 @@ func TestQueuedDeliveryStaysInflightOnceSent(t *testing.T) {
 	_, queued := cl.State.Inflight.NextImmediate()
 	require.False(t, queued)
 }
+
+// A connection whose session was dropped or taken over changes nothing in Topics with a late SUBSCRIBE or
+// UNSUBSCRIBE: its successor holds the same client id there.
+func TestLateSubscriptionChangesFromAFormerHolder(t *testing.T) {
+	s := newServer()
+	old := sessionTestClient("mochi")
+	s.Clients.Add(old)
+	require.Equal(t, old, s.DropSession(old, packets.ErrImplementationSpecificError))
+	cl := sessionTestClient("mochi")
+	require.False(t, s.takeOver(packets.Packet{Connect: packets.ConnectParams{ClientIdentifier: "mochi"}}, cl))
+	sub := packets.Subscription{Filter: "a/b/c", Qos: 1}
+	cl.State.Subscriptions.Add(sub.Filter, sub)
+	s.Topics.Subscribe(cl.ID, sub)
+
+	require.NoError(t, s.processUnsubscribe(old, packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Unsubscribe}, PacketID: 3, Filters: packets.Subscriptions{sub}}))
+	require.NotEmpty(t, s.Topics.Subscribers("a/b/c").Subscriptions)
+	require.NoError(t, s.processSubscribe(old, packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Subscribe}, PacketID: 4, Filters: packets.Subscriptions{{Filter: "d/e", Qos: 1}}}))
+	require.Empty(t, s.Topics.Subscribers("d/e").Subscriptions)
+}
