@@ -1663,7 +1663,9 @@ func TestServerProcessPacketAndNextImmediate(t *testing.T) {
 	buf, err := io.ReadAll(r)
 	require.NoError(t, err)
 	require.Equal(t, packets.TPacketData[packets.Publish].Get(packets.TPublishQos1).RawBytes, buf)
-	require.Equal(t, int64(0), atomic.LoadInt64(&s.Info.Inflight))
+	// Sent, it is still in flight until it is acknowledged.
+	require.Equal(t, int64(1), atomic.LoadInt64(&s.Info.Inflight))
+	require.Equal(t, 1, cl.State.Inflight.Len())
 	require.Equal(t, int32(4), cl.State.Inflight.sendQuota)
 }
 
@@ -5296,4 +5298,20 @@ func TestExpiredSessionRemovalLeavesASuccessor(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, cl, current)
 	require.NotEmpty(t, s.Topics.Subscribers("a/b/c").Subscriptions)
+}
+
+// A delivery queued while the client's receive maximum was reached stays in flight once it is sent: it waits for
+// its acknowledgement, and is sent again if the session resumes first.
+func TestQueuedDeliveryStaysInflightOnceSent(t *testing.T) {
+	s := newServer()
+	cl := sessionTestClient("mochi")
+	cl.State.Inflight.ResetSendQuota(1)
+	cl.State.Inflight.Set(packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Publish, Qos: 1}, PacketID: 2, TopicName: "a/b", Expiry: -1})
+
+	require.NoError(t, s.processPacket(cl, packets.Packet{FixedHeader: packets.FixedHeader{Type: packets.Pingreq}}))
+	sent, ok := cl.State.Inflight.Get(2)
+	require.True(t, ok, "the sent delivery left inflight before it was acknowledged")
+	require.Equal(t, int64(0), sent.Expiry)
+	_, queued := cl.State.Inflight.NextImmediate()
+	require.False(t, queued)
 }
